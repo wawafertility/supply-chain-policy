@@ -5,7 +5,7 @@ runs:
   steps:
     - name: Check dependency licences
       shell: bash
-      run: '"$GITHUB_ACTION_PATH/bin/check-dependency-licences"'
+      run: ruby "$GITHUB_ACTION_PATH/bin/check-dependency-licences"
     - name: Check asset licences
       if: ${{ !cancelled() }}
       shell: bash

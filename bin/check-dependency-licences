@@ -1,50 +1,80 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env ruby
+require "digest"
+require "etc"
+require "open-uri"
+require "tmpdir"
 
-osv_scanner_version="2.6.0"
-policy_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-work_dir="$(mktemp -d)"
-trap 'rm -rf "$work_dir"' EXIT
+class DependencyLicenceCheck
+  OSV_SCANNER_VERSION = "2.6.0".freeze
+  OSV_SCANNER_BUILDS = {
+    "Linux-x86_64" => {
+      platform: "linux_amd64",
+      checksum: "ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108"
+    },
+    "Linux-aarch64" => {
+      platform: "linux_arm64",
+      checksum: "2c71403eb443d05891c4f268c3ad771cf4f16e5443463fd7851ef8f454d3c7e4"
+    },
+    "Darwin-arm64" => {
+      platform: "darwin_arm64",
+      checksum: "98c460dcd37de25819babd757d04542045b6243113e209edcd4d89fedb0256b4"
+    }
+  }.freeze
 
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64)
-    platform="linux_amd64"
-    checksum="ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108"
-    ;;
-  Linux-aarch64)
-    platform="linux_arm64"
-    checksum="2c71403eb443d05891c4f268c3ad771cf4f16e5443463fd7851ef8f454d3c7e4"
-    ;;
-  Darwin-arm64)
-    platform="darwin_arm64"
-    checksum="98c460dcd37de25819babd757d04542045b6243113e209edcd4d89fedb0256b4"
-    ;;
-  *)
-    echo "No pinned osv-scanner build for $(uname -s)-$(uname -m)" >&2
-    exit 1
-    ;;
-esac
+  def initialize(policy_root:)
+    @policy_root = policy_root
+  end
 
-osv_scanner="$work_dir/osv-scanner"
-curl --fail --silent --show-error --location --output "$osv_scanner" \
-  "https://github.com/google/osv-scanner/releases/download/v${osv_scanner_version}/osv-scanner_${platform}"
+  def passes?
+    Dir.mktmpdir do |work_dir|
+      system(
+        download_osv_scanner(work_dir),
+        "scan", "source", "--recursive",
+        "--config", write_config(work_dir),
+        "--licenses=#{allowed_licences.join(",")}",
+        "."
+      )
+    end
+    Process.last_status.success?
+  end
 
-actual_checksum="$( (sha256sum "$osv_scanner" 2>/dev/null || shasum -a 256 "$osv_scanner") | cut -d' ' -f1)"
-if [[ "$actual_checksum" != "$checksum" ]]; then
-  echo "Checksum mismatch for osv-scanner ${osv_scanner_version} (${platform})" >&2
-  exit 1
-fi
-chmod +x "$osv_scanner"
+  private
 
-config="$work_dir/osv-scanner.toml"
-: > "$config"
-if [[ -f osv-scanner.toml ]]; then
-  cat osv-scanner.toml >> "$config"
-  printf '\n' >> "$config"
-fi
-cat "$policy_root/osv-scanner.toml" >> "$config"
+  attr_reader :policy_root
 
-"$osv_scanner" scan source --recursive \
-  --config "$config" \
-  --licenses="$(paste -s -d , "$policy_root/licences.txt")" \
-  .
+  def download_osv_scanner(work_dir)
+    binary = URI.open(download_url, "rb", &:read)
+    unless Digest::SHA256.hexdigest(binary) == build[:checksum]
+      abort "Checksum mismatch for osv-scanner #{OSV_SCANNER_VERSION} (#{build[:platform]})"
+    end
+
+    File.join(work_dir, "osv-scanner").tap do |path|
+      File.binwrite(path, binary)
+      File.chmod(0o755, path)
+    end
+  end
+
+  def download_url
+    "https://github.com/google/osv-scanner/releases/download/v#{OSV_SCANNER_VERSION}/osv-scanner_#{build[:platform]}"
+  end
+
+  def build
+    @build ||= OSV_SCANNER_BUILDS.fetch("#{Etc.uname[:sysname]}-#{Etc.uname[:machine]}") do |runner|
+      abort "No pinned osv-scanner build for #{runner}"
+    end
+  end
+
+  def write_config(work_dir)
+    repository_exceptions = File.exist?("osv-scanner.toml") ? "#{File.read("osv-scanner.toml")}\n" : ""
+    File.join(work_dir, "osv-scanner.toml").tap do |path|
+      File.write(path, repository_exceptions + File.read(File.join(policy_root, "osv-scanner.toml")))
+    end
+  end
+
+  def allowed_licences
+    File.readlines(File.join(policy_root, "licences.txt"), chomp: true)
+  end
+end
+
+check = DependencyLicenceCheck.new(policy_root: File.expand_path("..", __dir__))
+exit check.passes?
