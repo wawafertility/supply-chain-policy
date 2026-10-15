@@ -1,0 +1,94 @@
+#!/usr/bin/env ruby
+require "date"
+require "yaml"
+
+class AssetLicenceCheck
+  MANIFEST = "asset-licences.yml".freeze
+  EXTENSIONS = %w[
+    avif bmp eot gif heic ico jpeg jpg lottie m4a mov mp3 mp4 ogg otf pdf png svg tif tiff ttf wav webm webp woff woff2
+  ].freeze
+
+  def initialize(allowed_licences:, today: Date.today)
+    @allowed_licences = allowed_licences
+    @today = today
+  end
+
+  def errors
+    entry_errors + coverage_errors
+  end
+
+  private
+
+  attr_reader :allowed_licences, :today
+
+  def entry_errors
+    entries.each_with_index.flat_map do |entry, index|
+      errors_for(entry, "Entry #{index + 1} (#{entry["licence"]})")
+    end
+  end
+
+  def errors_for(entry, label)
+    errors = []
+    errors << "#{label} lists no files" if Array(entry["files"]).empty?
+    if allowed_licences.include?(entry["licence"])
+      errors << "#{label} needs a source" if blank?(entry["source"])
+    else
+      errors.concat(exception_errors(entry, label))
+    end
+    errors
+  end
+
+  def exception_errors(entry, label)
+    expiry = entry["until"]
+    unless expiry.is_a?(Date) && !blank?(entry["reason"])
+      return ["#{label} is not an allowed licence; an exception needs a reason and an until date"]
+    end
+    return ["#{label} exception expired on #{expiry}"] if expiry < today
+
+    []
+  end
+
+  def coverage_errors
+    unlisted = (tracked_assets - listed_files).map { |path| "#{path} is not in #{MANIFEST}" }
+    missing = (listed_files - tracked_files).map { |path| "#{path} is in #{MANIFEST} but not in the repository" }
+    duplicated = listed_files.tally.select { |_path, count| count > 1 }.keys.map do |path|
+      "#{path} is listed more than once in #{MANIFEST}"
+    end
+    unlisted + missing + duplicated
+  end
+
+  def entries
+    @entries ||= File.exist?(MANIFEST) ? YAML.safe_load_file(MANIFEST, permitted_classes: [Date]) || [] : []
+  end
+
+  def listed_files
+    @listed_files ||= entries.flat_map { |entry| Array(entry["files"]) }
+  end
+
+  def tracked_assets
+    @tracked_assets ||= tracked_files.select do |path|
+      EXTENSIONS.include?(File.extname(path).delete_prefix(".").downcase)
+    end
+  end
+
+  def tracked_files
+    @tracked_files ||= IO.popen(%w[git ls-files -z], &:read).split("\0")
+  end
+
+  def blank?(value)
+    value.to_s.strip.empty?
+  end
+end
+
+policy_root = File.expand_path("..", __dir__)
+allowed_licences = %w[licences.txt asset-only-licences.txt].flat_map do |name|
+  File.readlines(File.join(policy_root, name), chomp: true)
+end
+errors = AssetLicenceCheck.new(allowed_licences:).errors
+
+if errors.empty?
+  puts "Every tracked asset file has an allowed licence or an active exception"
+else
+  warn errors
+  abort "#{errors.size} asset licence problem(s); see #{AssetLicenceCheck::MANIFEST}"
+end

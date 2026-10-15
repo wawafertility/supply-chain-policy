@@ -1,0 +1,12 @@
+name: Licence check
+description: Fails when a dependency or asset licence falls outside Wawa's licence policy
+runs:
+  using: composite
+  steps:
+    - name: Check dependency licences
+      shell: bash
+      run: '"$GITHUB_ACTION_PATH/bin/check-dependency-licences"'
+    - name: Check asset licences
+      if: ${{ !cancelled() }}
+      shell: bash
+      run: ruby "$GITHUB_ACTION_PATH/bin/check-asset-licences"

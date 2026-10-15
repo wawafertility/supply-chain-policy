@@ -1,0 +1,2 @@
+LicenseRef-Commercial
+LicenseRef-Wawa-Proprietary

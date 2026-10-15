@@ -1,0 +1,3 @@
+[[PackageOverrides]]
+vulnerability.ignore = true
+reason = "Dependabot reports vulnerabilities; this check enforces licences only"

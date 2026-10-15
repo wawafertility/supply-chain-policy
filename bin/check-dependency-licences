@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+osv_scanner_version="2.6.0"
+policy_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+work_dir="$(mktemp -d)"
+trap 'rm -rf "$work_dir"' EXIT
+
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64)
+    platform="linux_amd64"
+    checksum="ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108"
+    ;;
+  Linux-aarch64)
+    platform="linux_arm64"
+    checksum="2c71403eb443d05891c4f268c3ad771cf4f16e5443463fd7851ef8f454d3c7e4"
+    ;;
+  Darwin-arm64)
+    platform="darwin_arm64"
+    checksum="98c460dcd37de25819babd757d04542045b6243113e209edcd4d89fedb0256b4"
+    ;;
+  *)
+    echo "No pinned osv-scanner build for $(uname -s)-$(uname -m)" >&2
+    exit 1
+    ;;
+esac
+
+osv_scanner="$work_dir/osv-scanner"
+curl --fail --silent --show-error --location --output "$osv_scanner" \
+  "https://github.com/google/osv-scanner/releases/download/v${osv_scanner_version}/osv-scanner_${platform}"
+
+actual_checksum="$( (sha256sum "$osv_scanner" 2>/dev/null || shasum -a 256 "$osv_scanner") | cut -d' ' -f1)"
+if [[ "$actual_checksum" != "$checksum" ]]; then
+  echo "Checksum mismatch for osv-scanner ${osv_scanner_version} (${platform})" >&2
+  exit 1
+fi
+chmod +x "$osv_scanner"
+
+config="$work_dir/osv-scanner.toml"
+: > "$config"
+if [[ -f osv-scanner.toml ]]; then
+  cat osv-scanner.toml >> "$config"
+  printf '\n' >> "$config"
+fi
+cat "$policy_root/osv-scanner.toml" >> "$config"
+
+"$osv_scanner" scan source --recursive \
+  --config "$config" \
+  --licenses="$(paste -s -d , "$policy_root/licences.txt")" \
+  .
