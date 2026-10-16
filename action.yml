@@ -10,3 +10,7 @@ runs:
       if: ${{ !cancelled() }}
       shell: bash
       run: ruby "$GITHUB_ACTION_PATH/bin/check-asset-licences"
+    - name: Check licence notices
+      if: ${{ !cancelled() }}
+      shell: bash
+      run: ruby "$GITHUB_ACTION_PATH/bin/check-licence-notices"

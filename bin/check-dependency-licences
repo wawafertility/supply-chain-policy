@@ -1,72 +1,94 @@
 #!/usr/bin/env ruby
-require "digest"
-require "etc"
-require "open-uri"
 require "tmpdir"
+require_relative "../lib/licence_matcher"
+require_relative "../lib/osv_scanner"
+require_relative "../lib/package_archive"
 
 class DependencyLicenceCheck
-  OSV_SCANNER_VERSION = "2.6.0".freeze
-  OSV_SCANNER_BUILDS = {
-    "Linux-x86_64" => {
-      platform: "linux_amd64",
-      checksum: "ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108"
-    },
-    "Linux-aarch64" => {
-      platform: "linux_arm64",
-      checksum: "2c71403eb443d05891c4f268c3ad771cf4f16e5443463fd7851ef8f454d3c7e4"
-    },
-    "Darwin-arm64" => {
-      platform: "darwin_arm64",
-      checksum: "98c460dcd37de25819babd757d04542045b6243113e209edcd4d89fedb0256b4"
-    }
-  }.freeze
+  UNVERIFIED_LICENCES = %w[UNKNOWN non-standard].freeze
+  HEADINGS = %w[Licence Ecosystem Package Version Lockfile].freeze
 
-  def initialize(policy_root:)
+  Violation = Data.define(:ecosystem, :name, :version, :source, :licences)
+
+  def initialize(policy_root:, work_dir:)
     @policy_root = policy_root
+    @work_dir = work_dir
+    @scanner = OsvScanner.new(work_dir:)
+    @matcher = LicenceMatcher.new(licence_directory: policy_root)
+    @verified_files = {}
   end
 
   def passes?
-    Dir.mktmpdir do |work_dir|
-      system(
-        download_osv_scanner(work_dir),
-        "scan", "source", "--recursive",
-        "--config", write_config(work_dir),
-        "--licenses=#{allowed_licences.join(",")}",
-        "."
-      )
-    end
-    Process.last_status.success?
+    verified, unresolved = violations.partition { |violation| verified_from_licence_files?(violation) }
+    report_verified(verified)
+    report_unresolved(unresolved)
+    unresolved.empty?
   end
 
   private
 
-  attr_reader :policy_root
+  attr_reader :policy_root, :work_dir, :scanner, :matcher, :verified_files
 
-  def download_osv_scanner(work_dir)
-    binary = URI.open(download_url, "rb", &:read)
-    unless Digest::SHA256.hexdigest(binary) == build[:checksum]
-      abort "Checksum mismatch for osv-scanner #{OSV_SCANNER_VERSION} (#{build[:platform]})"
-    end
+  def violations
+    results = scanner.scan("--recursive", "--config", config, "--licenses=#{allowed_licences.join(",")}", ".")
+    results.fetch("results", []).flat_map do |result|
+      source = result.dig("source", "path").delete_prefix("#{Dir.pwd}/")
+      result.fetch("packages").filter_map do |package|
+        licences = package.fetch("license_violations", [])
+        next if licences.empty?
 
-    File.join(work_dir, "osv-scanner").tap do |path|
-      File.binwrite(path, binary)
-      File.chmod(0o755, path)
-    end
-  end
-
-  def download_url
-    "https://github.com/google/osv-scanner/releases/download/v#{OSV_SCANNER_VERSION}/osv-scanner_#{build[:platform]}"
-  end
-
-  def build
-    @build ||= OSV_SCANNER_BUILDS.fetch("#{Etc.uname[:sysname]}-#{Etc.uname[:machine]}") do |runner|
-      abort "No pinned osv-scanner build for #{runner}"
+        details = package.fetch("package")
+        Violation.new(
+          ecosystem: details["ecosystem"],
+          name: details["name"],
+          version: details["version"],
+          source:,
+          licences:
+        )
+      end
     end
   end
 
-  def write_config(work_dir)
-    repository_exceptions = File.exist?("osv-scanner.toml") ? "#{File.read("osv-scanner.toml")}\n" : ""
+  def verified_from_licence_files?(violation)
+    return false unless (violation.licences - UNVERIFIED_LICENCES).empty?
+
+    contents = PackageArchive.fetch(ecosystem: violation.ecosystem, name: violation.name, version: violation.version)
+    return false if contents.nil? || contents.licence_texts.empty?
+
+    matches = contents.licence_texts.transform_values { |text| matcher.match(text) }
+    verified_files[violation] = matches
+    matches.values.all?
+  end
+
+  def report_verified(verified)
+    return if verified.empty?
+
+    puts "\nLicences verified from package files, because deps.dev could not classify them:"
+    verified.each do |violation|
+      files = verified_files.fetch(violation).map { |file, licence| "#{file} is #{licence}" }.join(", ")
+      puts "  #{violation.name} #{violation.version} (#{violation.ecosystem}): #{files}"
+    end
+  end
+
+  def report_unresolved(unresolved)
+    if unresolved.empty?
+      puts "\nEvery dependency licence is allowed or covered by an exception"
+      return
+    end
+
+    rows = unresolved.map do |violation|
+      [violation.licences.join(", "), violation.ecosystem, violation.name, violation.version, violation.source]
+    end
+    widths = HEADINGS.each_index.map { |index| ([HEADINGS] + rows).map { |row| row[index].length }.max }
+    puts "\n#{unresolved.size} dependency licence violation(s); add an exception to osv-scanner.toml or remove the package:"
+    ([HEADINGS] + rows).each do |row|
+      puts "  #{row.each_with_index.map { |cell, index| cell.ljust(widths[index]) }.join("  ")}"
+    end
+  end
+
+  def config
     File.join(work_dir, "osv-scanner.toml").tap do |path|
+      repository_exceptions = File.exist?("osv-scanner.toml") ? "#{File.read("osv-scanner.toml")}\n" : ""
       File.write(path, repository_exceptions + File.read(File.join(policy_root, "osv-scanner.toml")))
     end
   end
@@ -76,5 +98,6 @@ class DependencyLicenceCheck
   end
 end
 
-check = DependencyLicenceCheck.new(policy_root: File.expand_path("..", __dir__))
-exit check.passes?
+Dir.mktmpdir do |work_dir|
+  exit DependencyLicenceCheck.new(policy_root: File.expand_path("..", __dir__), work_dir:).passes?
+end

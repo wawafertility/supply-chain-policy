@@ -1,0 +1,67 @@
+#!/usr/bin/env ruby
+require "tmpdir"
+require "yaml"
+require_relative "../lib/licence_notices"
+require_relative "../lib/lockfile_packages"
+require_relative "../lib/osv_scanner"
+
+class LicenceNoticesCheck
+  CONFIGURATION = "licence-notices.yml".freeze
+  SHOWN_PER_LIST = 20
+
+  def initialize(policy_root:, work_dir:)
+    @lockfile_packages = LockfilePackages.new(scanner: OsvScanner.new(work_dir:))
+    @notices = LicenceNotices.new(policy_root:)
+  end
+
+  def passes?
+    unless File.exist?(CONFIGURATION)
+      puts "No #{CONFIGURATION}, so this repository declares nothing it distributes"
+      return true
+    end
+
+    out_of_date = YAML.safe_load_file(CONFIGURATION).reject { |surface| up_to_date?(surface) }
+    report_regeneration if out_of_date.any?
+    out_of_date.empty?
+  end
+
+  private
+
+  attr_reader :lockfile_packages, :notices
+
+  def up_to_date?(surface)
+    lockfile = surface.fetch("lockfile")
+    path = surface.fetch("notices")
+    expected = lockfile_packages.distributed_packages(
+      lockfile,
+      include_dev: surface.fetch("include_dev", false),
+      exclude: surface.fetch("exclude", [])
+    ).map(&:label)
+    listed = notices.packages_in(path)
+    missing = expected - listed
+    unused = listed - expected
+    if missing.empty? && unused.empty?
+      puts "#{path} lists every distributed package in #{lockfile}"
+      return true
+    end
+
+    puts "#{path} is out of date with #{lockfile}: #{missing.size} missing, #{unused.size} no longer used"
+    missing.first(SHOWN_PER_LIST).each { |label| puts "  missing: #{label}" }
+    unused.first(SHOWN_PER_LIST).each { |label| puts "  no longer used: #{label}" }
+    false
+  end
+
+  def report_regeneration
+    puts <<~TEXT
+
+      Regenerate the notices from the repository root, then commit them:
+        git clone --quiet https://github.com/wawafertility/supply-chain-policy /tmp/supply-chain-policy
+        git -C /tmp/supply-chain-policy checkout --quiet #{ENV.fetch("GITHUB_ACTION_REF", "main")}
+        ruby /tmp/supply-chain-policy/bin/write-licence-notices
+    TEXT
+  end
+end
+
+Dir.mktmpdir do |work_dir|
+  exit LicenceNoticesCheck.new(policy_root: File.expand_path("..", __dir__), work_dir:).passes?
+end

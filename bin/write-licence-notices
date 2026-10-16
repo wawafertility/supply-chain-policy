@@ -1,0 +1,23 @@
+#!/usr/bin/env ruby
+require "tmpdir"
+require "yaml"
+require_relative "../lib/licence_notices"
+require_relative "../lib/lockfile_packages"
+require_relative "../lib/osv_scanner"
+
+abort "No licence-notices.yml in #{Dir.pwd}; run this from the repository root" unless File.exist?("licence-notices.yml")
+
+Dir.mktmpdir do |work_dir|
+  lockfile_packages = LockfilePackages.new(scanner: OsvScanner.new(work_dir:))
+  notices = LicenceNotices.new(policy_root: File.expand_path("..", __dir__))
+
+  YAML.safe_load_file("licence-notices.yml").each do |surface|
+    packages = lockfile_packages.distributed_packages(
+      surface.fetch("lockfile"),
+      include_dev: surface.fetch("include_dev", false),
+      exclude: surface.fetch("exclude", [])
+    )
+    notices.write(surface.fetch("notices"), packages)
+    puts "Wrote #{surface.fetch("notices")} (#{packages.size} packages from #{surface.fetch("lockfile")})"
+  end
+end
